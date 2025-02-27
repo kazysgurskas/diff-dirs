@@ -1,0 +1,82 @@
+name: GitOps Diff
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  gitops-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get fixed live reference
+        id: get-live-ref
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Try to get existing reference from PR comment
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            const refMarker = "<!-- GITOPS_LIVE_REF:";
+            const existingComment = comments.find(comment => comment.body.includes(refMarker));
+
+            if (existingComment) {
+              // Extract reference from existing comment
+              const match = existingComment.body.match(new RegExp(`${refMarker}([a-f0-9]+) -->`));
+              if (match && match[1]) {
+                console.log(`Found existing live reference: ${match[1]}`);
+                return match[1];
+              }
+            }
+
+            // If no reference exists, create a new one
+            const execSync = require('child_process').execSync;
+            execSync('git fetch origin live');
+            const liveRef = execSync('git rev-parse origin/live').toString().trim();
+
+            // Store reference in a new comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### GitOps Reference Point\nUsing live branch at commit: \`${liveRef}\`\n\n<!-- GITOPS_LIVE_REF:${liveRef} -->`
+            });
+
+            console.log(`Created new live reference: ${liveRef}`);
+            return liveRef;
+          result-encoding: string
+
+      - name: Set environment variables
+        run: |
+          echo "LIVE_HEAD=${{ steps.get-live-ref.outputs.result }}" >> $GITHUB_ENV
+
+      - name: Render Helm charts from PR branch
+        run: |
+          ./render-helm-charts.sh
+          mkdir -p /tmp/pr-output
+          cp -r output/* /tmp/pr-output/
+
+      - name: Checkout live at specific commit
+        run: |
+          git checkout $LIVE_HEAD
+          ./render-helm-charts.sh
+          mkdir -p /tmp/live-output
+          cp -r output/* /tmp/live-output/
+
+      - name: Post GitOps diff
+        uses: your-username/gitops-diff-split-comments@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          source-dir: /tmp/live-output
+          target-dir: /tmp/pr-output
+          comment-prefix: "GitOps Diff"
+          ignore-patterns: "*.md,.gitignore,README.*"

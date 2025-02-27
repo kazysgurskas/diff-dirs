@@ -1,0 +1,38 @@
+name: 'Split diff comment action'
+description: 'Generate and post diff in comments on PR'
+author: 'Kazys Gurskas'
+inputs:
+  token:
+    description: 'GitHub token for posting comments'
+    required: true
+    default: ${{ github.token }}
+  source-dir:
+    description: 'Source directory for comparison (typically from PR branch)'
+    required: true
+  target-dir:
+    description: 'Target directory for comparison (typically from target branch)'
+    required: true
+  max-comment-size:
+    description: 'Maximum size in characters for each comment'
+    required: false
+    default: '65000'
+  ignore-patterns:
+    description: 'Comma-separated list of file patterns to ignore'
+    required: false
+    default: ''
+  delete-previous-comments:
+    description: 'Whether to delete previous diff comments'
+    required: false
+    default: 'true'
+  comment-prefix:
+    description: 'Prefix to add to each comment title'
+    required: false
+    default: 'Diff'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'

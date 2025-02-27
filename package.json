@@ -1,0 +1,21 @@
+{
+  "name": "diff-action",
+  "version": "1.0.0",
+  "description": "Generate and post diff in comments on PR.",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "github",
+    "action",
+    "diff"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.0",
+    "@actions/github": "^5.1.1",
+    "ignore": "^5.2.4"
+  }
+}
