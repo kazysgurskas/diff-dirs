@@ -1,15 +1,13 @@
 {
-  "name": "diff-action",
+  "name": "diff-dirs-action",
   "version": "1.0.0",
-  "description": "Generate and post diff in comments on PR.",
+  "description": "Generate and post diff in comments on Github Pull Request.",
   "main": "src/index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
   "keywords": [
     "github",
     "action",
-    "diff"
+    "diff",
+    "directories"
   ],
   "author": "Your Name",
   "license": "MIT",

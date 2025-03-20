@@ -5,7 +5,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const util = require('util');
 const execAsync = util.promisify(exec);
-const { generateDiff, splitDiffByFiles } = require('./diffUtils');
+const { generateDiff, splitDiffByFiles } = require('./utils');
 
 async function run() {
   try {
@@ -16,7 +16,6 @@ async function run() {
     const maxCommentSize = parseInt(core.getInput('max-comment-size'));
     const ignorePatterns = core.getInput('ignore-patterns');
     const deletePreviousComments = core.getInput('delete-previous-comments') === 'true';
-    const commentPrefix = core.getInput('comment-prefix');
 
     // Validate input
     if (!fs.existsSync(sourceDir)) {
@@ -55,7 +54,7 @@ async function run() {
     // Delete previous comments if required
     if (deletePreviousComments) {
       core.info('Deleting previous diff comments...');
-      await deletePreviousDiffComments(octokit, owner, repo, prNumber, commentPrefix);
+      await deletePreviousDiffComments(octokit, owner, repo, prNumber);
     }
 
     // If no diff files, post a single comment
@@ -66,20 +65,13 @@ async function run() {
         owner,
         repo,
         prNumber,
-        `### ${commentPrefix}\nNo differences found between directories.`
+        `### No differences\nNo differences found.`
       );
       return;
     }
 
-    // Post summary comment
-    core.info('Posting summary comment...');
-    await postComment(
-      octokit,
-      owner,
-      repo,
-      prNumber,
-      `### ${commentPrefix} Summary\nFound changes in ${diffFiles.length} file(s). Detailed diffs follow in separate comments.`
-    );
+    // Proceed directly to posting individual diff comments
+    core.info('Posting individual diff comments...');
 
     // Post each file diff as a separate comment
     core.info('Posting individual diff comments...');
@@ -87,14 +79,17 @@ async function run() {
       const diffContent = fs.readFileSync(file, 'utf8');
       const fileName = path.basename(file).replace(/^\d+_/, '').replace('.diff', '');
 
+      // Extract file basename from the diff content
+      const fileBasename = extractFileBasename(diffContent);
+
       // Handle large diffs by splitting into multiple comments if needed
       if (diffContent.length > maxCommentSize - 100) {
         const chunks = splitLargeContent(diffContent, maxCommentSize - 100);
 
         for (let i = 0; i < chunks.length; i++) {
           const title = i === 0 ?
-            `### ${commentPrefix} for ${fileName}` :
-            `### ${commentPrefix} for ${fileName} (continued ${i+1}/${chunks.length})`;
+            `### ${fileBasename}` :
+            `### ${fileBasename} (continued ${i+1}/${chunks.length})`;
 
           await postComment(
             octokit,
@@ -114,7 +109,7 @@ async function run() {
           owner,
           repo,
           prNumber,
-          `### ${commentPrefix} for ${fileName}\n\`\`\`diff\n${diffContent}\n\`\`\``
+          `### ${fileBasename}\n\`\`\`diff\n${diffContent}\n\`\`\``
         );
 
         // Add a small delay to avoid rate limiting
@@ -128,7 +123,7 @@ async function run() {
   }
 }
 
-async function deletePreviousDiffComments(octokit, owner, repo, prNumber, commentPrefix) {
+async function deletePreviousDiffComments(octokit, owner, repo, prNumber) {
   const { data: comments } = await octokit.rest.issues.listComments({
     owner,
     repo,
@@ -136,9 +131,10 @@ async function deletePreviousDiffComments(octokit, owner, repo, prNumber, commen
     per_page: 100
   });
 
+  // Filter comments that look like diff comments (have diff code blocks or "No differences" title)
   const diffComments = comments.filter(comment =>
-    comment.body.includes(`### ${commentPrefix}`) ||
-    comment.body.includes(`### ${commentPrefix} for`)
+    (comment.body.includes('```diff') && comment.body.includes('###')) ||
+    comment.body.includes('### No differences')
   );
 
   for (const comment of diffComments) {
@@ -159,6 +155,49 @@ async function postComment(octokit, owner, repo, prNumber, body) {
     issue_number: prNumber,
     body
   });
+}
+
+/**
+ * Extract the filename basename from diff content
+ *
+ * @param {string} diffContent - The diff content
+ * @returns {string} - The basename of the file
+ */
+function extractFileBasename(diffContent) {
+  // Try to extract the filename from the diff header line
+  const lines = diffContent.split('\n');
+  for (const line of lines) {
+    if (line.startsWith('diff ')) {
+      // Try git diff format - "diff --git a/path/to/file b/path/to/file"
+      const gitMatch = line.match(/diff --git a\/(.+) b\/.+/);
+      if (gitMatch && gitMatch[1]) {
+        return path.basename(gitMatch[1]);
+      }
+
+      // Try directory diff format - "diff -r /path1/file /path2/file"
+      const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
+      if (dirMatch && dirMatch[2]) {
+        return path.basename(dirMatch[2]);
+      }
+
+      // Try other diff formats
+      const pathMatch = line.match(/diff .* [ab]\/(.*)/);
+      if (pathMatch && pathMatch[1]) {
+        return path.basename(pathMatch[1]);
+      }
+    }
+
+    // Also check for +++ and --- lines which often contain filenames
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      const fileMatch = line.match(/(?:---|\+\+\+) (?:[ab]\/)?(.+)/);
+      if (fileMatch && fileMatch[1] && fileMatch[1] !== '/dev/null') {
+        return path.basename(fileMatch[1]);
+      }
+    }
+  }
+
+  // If we can't extract the filename, return a generic name
+  return "File";
 }
 
 function splitLargeContent(content, maxSize) {

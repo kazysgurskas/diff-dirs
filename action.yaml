@@ -1,16 +1,22 @@
-name: 'Split diff comment action'
-description: 'Generate and post diff in comments on PR'
+name: 'diff-dirs-action'
+description: 'Generate and post diff in comments on Github Pull Request.'
 author: 'Kazys Gurskas'
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
 inputs:
   token:
     description: 'GitHub token for posting comments'
     required: true
     default: ${{ github.token }}
   source-dir:
-    description: 'Source directory for comparison (typically from PR branch)'
+    description: 'Source directory for comparison (typically from head branch)'
     required: true
   target-dir:
-    description: 'Target directory for comparison (typically from target branch)'
+    description: 'Target directory for comparison (typically from base branch)'
     required: true
   max-comment-size:
     description: 'Maximum size in characters for each comment'
@@ -24,15 +30,3 @@ inputs:
     description: 'Whether to delete previous diff comments'
     required: false
     default: 'true'
-  comment-prefix:
-    description: 'Prefix to add to each comment title'
-    required: false
-    default: 'Diff'
-
-runs:
-  using: 'docker'
-  image: 'Dockerfile'
-
-branding:
-  icon: 'git-pull-request'
-  color: 'blue'

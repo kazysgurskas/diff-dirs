@@ -1,6 +1,5 @@
-FROM node:18-slim
+FROM node:22.14.0-slim
 
-# Install required dependencies
 RUN apt-get update && apt-get install -y \
     git \
     diffutils \
@@ -10,12 +9,10 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js dependencies
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-# Copy action code
 COPY src/ ./src/
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
