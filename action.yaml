@@ -30,3 +30,7 @@ inputs:
     description: 'Whether to delete previous diff comments'
     required: false
     default: 'true'
+  include-headers:
+    description: 'Whether to include diff headers in comments'
+    required: false
+    default: 'false'

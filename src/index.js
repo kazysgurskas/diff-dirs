@@ -16,6 +16,7 @@ async function run() {
     const maxCommentSize = parseInt(core.getInput('max-comment-size'));
     const ignorePatterns = core.getInput('ignore-patterns');
     const deletePreviousComments = core.getInput('delete-previous-comments') === 'true';
+    const includeHeaders = core.getInput('include-headers') === 'true';
 
     // Validate input
     if (!fs.existsSync(sourceDir)) {
@@ -46,9 +47,13 @@ async function run() {
     const rawDiffFile = path.join(diffDir, 'raw-diff.txt');
     await generateDiff(sourceDir, targetDir, rawDiffFile, ignorePatterns);
 
+    // Read the raw diff to store file paths for later use when headers are disabled
+    const rawDiffContent = fs.readFileSync(rawDiffFile, 'utf8');
+    const filePathMap = extractFilePathsFromRawDiff(rawDiffContent);
+
     // Split diff by files
     core.info('Splitting diff by files...');
-    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir);
+    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir, includeHeaders);
     core.info(`Generated ${diffFiles.length} diff files`);
 
     // Delete previous comments if required
@@ -74,13 +79,18 @@ async function run() {
     core.info('Posting individual diff comments...');
 
     // Post each file diff as a separate comment
-    core.info('Posting individual diff comments...');
     for (const file of diffFiles) {
       const diffContent = fs.readFileSync(file, 'utf8');
-      const fileName = path.basename(file).replace(/^\d+_/, '').replace('.diff', '');
 
-      // Extract file basename from the diff content
-      const fileBasename = extractFileBasename(diffContent);
+      // Get the filename from the file path map or extract it from content
+      const fileIndex = parseInt(path.basename(file).split('_')[0]);
+      let fileBasename;
+
+      if (filePathMap[fileIndex]) {
+        fileBasename = filePathMap[fileIndex];
+      } else {
+        fileBasename = extractFileBasename(diffContent, includeHeaders, file);
+      }
 
       // Handle large diffs by splitting into multiple comments if needed
       if (diffContent.length > maxCommentSize - 100) {
@@ -123,6 +133,59 @@ async function run() {
   }
 }
 
+/**
+ * Extract file paths from the raw diff file
+ *
+ * @param {string} rawDiffContent - Content of the raw diff file
+ * @returns {Object} Map of file index to filename
+ */
+function extractFilePathsFromRawDiff(rawDiffContent) {
+  const filePathMap = {};
+  const lines = rawDiffContent.split('\n');
+  let fileIndex = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.startsWith('diff ')) {
+      // Try various diff formats to extract filenames
+      let filePath = null;
+
+      // Try git diff format
+      const gitMatch = line.match(/diff --git a\/(.+) b\/.+/);
+      if (gitMatch && gitMatch[1]) {
+        filePath = gitMatch[1];
+      }
+
+      // Try directory diff format
+      if (!filePath) {
+        const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
+        if (dirMatch && dirMatch[2]) {
+          filePath = dirMatch[2];
+        }
+      }
+
+      // Try other formats
+      if (!filePath) {
+        // Check the +++ line which often follows diff line
+        if (i + 2 < lines.length && lines[i + 2].startsWith('+++ ')) {
+          const fileMatch = lines[i + 2].match(/\+\+\+ (?:[b]\/)?(.+)/);
+          if (fileMatch && fileMatch[1] && fileMatch[1] !== '/dev/null') {
+            filePath = fileMatch[1];
+          }
+        }
+      }
+
+      if (filePath) {
+        filePathMap[fileIndex] = path.basename(filePath);
+        fileIndex++;
+      }
+    }
+  }
+
+  return filePathMap;
+}
+
 async function deletePreviousDiffComments(octokit, owner, repo, prNumber) {
   const { data: comments } = await octokit.rest.issues.listComments({
     owner,
@@ -161,37 +224,59 @@ async function postComment(octokit, owner, repo, prNumber, body) {
  * Extract the filename basename from diff content
  *
  * @param {string} diffContent - The diff content
+ * @param {boolean} includeHeaders - Whether headers are included in the content
+ * @param {string} filePath - The path to the diff file
  * @returns {string} - The basename of the file
  */
-function extractFileBasename(diffContent) {
-  // Try to extract the filename from the diff header line
+function extractFileBasename(diffContent, includeHeaders, filePath) {
+  // First try to extract from the diff file name itself
+  const fileName = path.basename(filePath).replace(/^\d+_/, '').replace('.diff', '');
+  if (fileName && fileName !== 'File') {
+    return fileName;
+  }
+
   const lines = diffContent.split('\n');
-  for (const line of lines) {
-    if (line.startsWith('diff ')) {
-      // Try git diff format - "diff --git a/path/to/file b/path/to/file"
-      const gitMatch = line.match(/diff --git a\/(.+) b\/.+/);
-      if (gitMatch && gitMatch[1]) {
-        return path.basename(gitMatch[1]);
+
+  // If headers are included, extract from diff headers
+  if (includeHeaders) {
+    for (const line of lines) {
+      if (line.startsWith('diff ')) {
+        // Try git diff format - "diff --git a/path/to/file b/path/to/file"
+        const gitMatch = line.match(/diff --git a\/(.+) b\/.+/);
+        if (gitMatch && gitMatch[1]) {
+          return path.basename(gitMatch[1]);
+        }
+
+        // Try directory diff format - "diff -r /path1/file /path2/file"
+        const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
+        if (dirMatch && dirMatch[2]) {
+          return path.basename(dirMatch[2]);
+        }
+
+        // Try other diff formats
+        const pathMatch = line.match(/diff .* [ab]\/(.*)/);
+        if (pathMatch && pathMatch[1]) {
+          return path.basename(pathMatch[1]);
+        }
       }
 
-      // Try directory diff format - "diff -r /path1/file /path2/file"
-      const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
-      if (dirMatch && dirMatch[2]) {
-        return path.basename(dirMatch[2]);
-      }
-
-      // Try other diff formats
-      const pathMatch = line.match(/diff .* [ab]\/(.*)/);
-      if (pathMatch && pathMatch[1]) {
-        return path.basename(pathMatch[1]);
+      // Also check for +++ and --- lines which often contain filenames
+      if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+        const fileMatch = line.match(/(?:---|\+\+\+) (?:[ab]\/)?(.+)/);
+        if (fileMatch && fileMatch[1] && fileMatch[1] !== '/dev/null') {
+          return path.basename(fileMatch[1]);
+        }
       }
     }
+  }
 
-    // Also check for +++ and --- lines which often contain filenames
-    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
-      const fileMatch = line.match(/(?:---|\+\+\+) (?:[ab]\/)?(.+)/);
-      if (fileMatch && fileMatch[1] && fileMatch[1] !== '/dev/null') {
-        return path.basename(fileMatch[1]);
+  // We still need to handle cases where the filename might be in the hunk header
+  for (const line of lines) {
+    if (line.startsWith('@@ ')) {
+      // Some diff formats include the filename in the hunk header
+      const commentMatch = line.match(/@@ .* @@ (?:.*\/)?([^\/\s]+)/);
+      if (commentMatch && commentMatch[1]) {
+        return commentMatch[1];
       }
     }
   }
