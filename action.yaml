@@ -6,7 +6,7 @@ branding:
   color: 'blue'
 runs:
   using: 'docker'
-  image: 'Dockerfile'
+  image: 'docker://ghcr.io/kazysgurskas/diff-dirs:latest'
 inputs:
   token:
     description: 'GitHub token for posting comments'
