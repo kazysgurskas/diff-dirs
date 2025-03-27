@@ -93,9 +93,10 @@ process.stdin.on('end', () => {
  *
  * @param {string} diffFile - Path to the diff file
  * @param {string} outputDir - Directory to write the split files to
+ * @param {boolean} includeHeaders - Whether to include diff headers in the output
  * @returns {Promise<string[]>} - Paths to the generated diff files
  */
-async function splitDiffByFiles(diffFile, outputDir) {
+async function splitDiffByFiles(diffFile, outputDir, includeHeaders = true) {
   try {
     // Clean previous files if any
     const existingFiles = fs.readdirSync(outputDir)
@@ -113,6 +114,7 @@ const path = require('path');
 
 const inputFile = process.argv[2];
 const outputDir = process.argv[3];
+const includeHeaders = process.argv[4] === 'true';
 
 const content = fs.readFileSync(inputFile, 'utf8');
 const lines = content.split('\\n');
@@ -122,6 +124,7 @@ let currentContent = '';
 let fileCounter = 0;
 const seenFiles = new Map();
 const outputFiles = [];
+let inContentSection = false;
 
 // Process each line
 for (let i = 0; i < lines.length; i++) {
@@ -167,10 +170,40 @@ for (let i = 0; i < lines.length; i++) {
     }
 
     currentFile = extractedFile;
-    currentContent = line;
-  } else {
-    // Append to current content
-    currentContent += '\\n' + line;
+    inContentSection = false;
+
+    // If we're including headers, start with the diff line
+    // Otherwise, start with an empty string that will be populated by content lines
+    currentContent = includeHeaders ? line : '';
+  } else if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+    // These are the file identifier lines, include them only if headers are enabled
+    if (includeHeaders && currentContent) {
+      currentContent += '\\n' + line;
+    }
+  } else if (line.startsWith('@@ ')) {
+    // These are the hunk headers, include them only if headers are enabled
+    if (includeHeaders && currentContent) {
+      currentContent += '\\n' + line;
+    }
+    // Mark that we're now in the content section (after this hunk header)
+    inContentSection = true;
+  } else if (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) {
+    // This is actual diff content, always include
+    if (inContentSection) {
+      if (currentContent) {
+        currentContent += '\\n' + line;
+      } else {
+        currentContent = line;
+      }
+    } else if (includeHeaders && currentContent) {
+      // If we're not in content section yet but headers are enabled, include this line
+      currentContent += '\\n' + line;
+    }
+  } else if (currentContent) {
+    // For any other lines, include them only if headers are enabled
+    if (includeHeaders) {
+      currentContent += '\\n' + line;
+    }
   }
 }
 
@@ -193,7 +226,7 @@ if (currentFile && currentContent) {
 console.log(JSON.stringify(outputFiles));
     `);
 
-    const { stdout } = await execAsync(`node ${splitScript} "${diffFile}" "${outputDir}"`);
+    const { stdout } = await execAsync(`node ${splitScript} "${diffFile}" "${outputDir}" "${includeHeaders}"`);
     return JSON.parse(stdout);
   } catch (error) {
     throw new Error(`Failed to split diff: ${error.message}`);
