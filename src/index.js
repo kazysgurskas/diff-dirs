@@ -84,12 +84,12 @@ async function run() {
 
       // Get the filename from the file path map or extract it from content
       const fileIndex = parseInt(path.basename(file).split('_')[0]);
-      let fileBasename;
+      let filePath;
 
       if (filePathMap[fileIndex]) {
-        fileBasename = filePathMap[fileIndex];
+        filePath = filePathMap[fileIndex];
       } else {
-        fileBasename = extractFileBasename(diffContent, includeHeaders, file);
+        filePath = extractFilePath(diffContent, includeHeaders, file);
       }
 
       // Handle large diffs by splitting into multiple comments if needed
@@ -98,8 +98,8 @@ async function run() {
 
         for (let i = 0; i < chunks.length; i++) {
           const title = i === 0 ?
-            `### ${fileBasename}` :
-            `### ${fileBasename} (continued ${i+1}/${chunks.length})`;
+            `### ${filePath}` :
+            `### ${filePath} (continued ${i+1}/${chunks.length})`;
 
           await postComment(
             octokit,
@@ -119,7 +119,7 @@ async function run() {
           owner,
           repo,
           prNumber,
-          `### ${fileBasename}\n\`\`\`diff\n${diffContent}\n\`\`\``
+          `### ${filePath}\n\`\`\`diff\n${diffContent}\n\`\`\``
         );
 
         // Add a small delay to avoid rate limiting
@@ -137,7 +137,7 @@ async function run() {
  * Extract file paths from the raw diff file
  *
  * @param {string} rawDiffContent - Content of the raw diff file
- * @returns {Object} Map of file index to filename
+ * @returns {Object} Map of file index to filepath
  */
 function extractFilePathsFromRawDiff(rawDiffContent) {
   const filePathMap = {};
@@ -177,7 +177,13 @@ function extractFilePathsFromRawDiff(rawDiffContent) {
       }
 
       if (filePath) {
-        filePathMap[fileIndex] = path.basename(filePath);
+        // Store the full relative path instead of just the basename
+        // If it's an absolute path from the target directory, make it relative
+        const targetDir = core.getInput('target-dir');
+        if (filePath.startsWith(targetDir)) {
+          filePath = filePath.substring(targetDir.length + 1); // +1 to remove leading slash
+        }
+        filePathMap[fileIndex] = filePath;
         fileIndex++;
       }
     }
@@ -221,19 +227,18 @@ async function postComment(octokit, owner, repo, prNumber, body) {
 }
 
 /**
- * Extract the filename basename from diff content
+ * Extract the full file path from diff content
  *
  * @param {string} diffContent - The diff content
  * @param {boolean} includeHeaders - Whether headers are included in the content
  * @param {string} filePath - The path to the diff file
- * @returns {string} - The basename of the file
+ * @returns {string} - The relative file path
  */
-function extractFileBasename(diffContent, includeHeaders, filePath) {
+function extractFilePath(diffContent, includeHeaders, filePath) {
   // First try to extract from the diff file name itself
   const fileName = path.basename(filePath).replace(/^\d+_/, '').replace('.diff', '');
-  if (fileName && fileName !== 'File') {
-    return fileName;
-  }
+
+  // Only use the filename from the diff file as a last resort
 
   const lines = diffContent.split('\n');
 
@@ -244,19 +249,25 @@ function extractFileBasename(diffContent, includeHeaders, filePath) {
         // Try git diff format - "diff --git a/path/to/file b/path/to/file"
         const gitMatch = line.match(/diff --git a\/(.+) b\/.+/);
         if (gitMatch && gitMatch[1]) {
-          return path.basename(gitMatch[1]);
+          return gitMatch[1];
         }
 
         // Try directory diff format - "diff -r /path1/file /path2/file"
         const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
         if (dirMatch && dirMatch[2]) {
-          return path.basename(dirMatch[2]);
+          // Get the path relative to the target directory
+          const targetDir = core.getInput('target-dir');
+          const absolutePath = dirMatch[2];
+          if (absolutePath.startsWith(targetDir)) {
+            return absolutePath.substring(targetDir.length + 1); // +1 to remove the leading slash
+          }
+          return dirMatch[2];
         }
 
         // Try other diff formats
         const pathMatch = line.match(/diff .* [ab]\/(.*)/);
         if (pathMatch && pathMatch[1]) {
-          return path.basename(pathMatch[1]);
+          return pathMatch[1];
         }
       }
 
@@ -264,7 +275,7 @@ function extractFileBasename(diffContent, includeHeaders, filePath) {
       if (line.startsWith('--- ') || line.startsWith('+++ ')) {
         const fileMatch = line.match(/(?:---|\+\+\+) (?:[ab]\/)?(.+)/);
         if (fileMatch && fileMatch[1] && fileMatch[1] !== '/dev/null') {
-          return path.basename(fileMatch[1]);
+          return fileMatch[1];
         }
       }
     }
@@ -274,14 +285,24 @@ function extractFileBasename(diffContent, includeHeaders, filePath) {
   for (const line of lines) {
     if (line.startsWith('@@ ')) {
       // Some diff formats include the filename in the hunk header
-      const commentMatch = line.match(/@@ .* @@ (?:.*\/)?([^\/\s]+)/);
+      const commentMatch = line.match(/@@ .* @@ (.+)/);
       if (commentMatch && commentMatch[1]) {
-        return commentMatch[1];
+        // This might contain the path or just the filename
+        // Try to determine if it's a path
+        const possiblePath = commentMatch[1].trim();
+        if (possiblePath.includes('/')) {
+          return possiblePath;
+        }
       }
     }
   }
 
-  // If we can't extract the filename, return a generic name
+  // If we can't extract the path, return the filename we extracted earlier
+  if (fileName && fileName !== 'File') {
+    return fileName;
+  }
+
+  // If all else fails
   return "File";
 }
 
