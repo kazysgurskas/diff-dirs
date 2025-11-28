@@ -53,7 +53,7 @@ async function run() {
 
     // Split diff by files
     core.info('Splitting diff by files...');
-    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir, includeHeaders);
+    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir, includeHeaders, targetDir);
     core.info(`Generated ${diffFiles.length} diff files`);
 
     // Delete previous comments if required
