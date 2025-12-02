@@ -4,9 +4,6 @@ author: 'Kazys Gurskas'
 branding:
   icon: 'git-pull-request'
   color: 'blue'
-runs:
-  using: 'docker'
-  image: 'docker://ghcr.io/kazysgurskas/diff-dirs:latest'
 inputs:
   token:
     description: 'GitHub token for posting comments'
@@ -34,3 +31,6 @@ inputs:
     description: 'Whether to include diff headers in comments'
     required: false
     default: 'false'
+runs:
+  using: 'docker'
+  image: 'docker://ghcr.io/kazysgurskas/diff-dirs:latest'

@@ -7,33 +7,86 @@ const util = require('util');
 const execAsync = util.promisify(exec);
 const { generateDiff, splitDiffByFiles } = require('./utils');
 
-async function run() {
+/**
+ * Get input value, supporting both GitHub Actions and local testing
+ */
+function getInput(name, defaultValue = '') {
+  // Try GitHub Actions input first (works in both Docker and composite actions)
   try {
-    // Get inputs
-    const token = core.getInput('token');
-    const sourceDir = core.getInput('source-dir');
-    const targetDir = core.getInput('target-dir');
-    const maxCommentSize = parseInt(core.getInput('max-comment-size'));
-    const ignorePatterns = core.getInput('ignore-patterns');
-    const deletePreviousComments = core.getInput('delete-previous-comments') === 'true';
-    const includeHeaders = core.getInput('include-headers') === 'true';
+    const value = core.getInput(name);
+    if (value) return value;
+  } catch (e) {
+    // Not in GitHub Actions environment or core.getInput failed
+  }
+
+  // Fallback to environment variables (for composite actions or CLI)
+  const envVar = process.env[`INPUT_${name.toUpperCase().replace(/-/g, '_')}`];
+  if (envVar !== undefined && envVar !== '') {
+    return envVar;
+  }
+
+  return defaultValue;
+}
+
+/**
+ * Check if we're running in GitHub Actions
+ */
+function isGitHubActions() {
+  return process.env.GITHUB_ACTIONS === 'true' || process.env.GITHUB_REPOSITORY !== undefined;
+}
+
+async function run() {
+  // Support CLI mode with command-line arguments
+  const isCLI = process.argv.length >= 4;
+
+  try {
+    let sourceDir, targetDir;
+
+    if (isCLI) {
+      // CLI mode: node src/index.js <source-dir> <target-dir> [options]
+      sourceDir = process.argv[2];
+      targetDir = process.argv[3];
+    } else {
+      // GitHub Actions mode
+      sourceDir = getInput('source-dir');
+      targetDir = getInput('target-dir');
+    }
+
+    // Get other inputs with defaults
+    const token = getInput('token', process.env.GITHUB_TOKEN || '');
+    const maxCommentSize = parseInt(getInput('max-comment-size', '65000'));
+    const ignorePatterns = getInput('ignore-patterns', '');
+    const deletePreviousComments = getInput('delete-previous-comments', 'true') === 'true';
+    const includeHeaders = getInput('include-headers', 'false') === 'true';
 
     // Validate input
-    if (!fs.existsSync(sourceDir)) {
+    if (!sourceDir || !fs.existsSync(sourceDir)) {
       throw new Error(`Source directory does not exist: ${sourceDir}`);
     }
-    if (!fs.existsSync(targetDir)) {
+    if (!targetDir || !fs.existsSync(targetDir)) {
       throw new Error(`Target directory does not exist: ${targetDir}`);
     }
 
-    // Initialize GitHub client
-    const octokit = github.getOctokit(token);
-    const context = github.context;
-    const { owner, repo } = context.repo;
-    const prNumber = context.payload.pull_request?.number;
+    // Initialize GitHub client (only if in GitHub Actions or token provided)
+    let octokit = null;
+    let owner = null;
+    let repo = null;
+    let prNumber = null;
 
-    if (!prNumber) {
-      throw new Error('This action can only be run on pull request events');
+    if (isGitHubActions() && !isCLI) {
+      try {
+        octokit = github.getOctokit(token);
+        const context = github.context;
+        owner = context.repo?.owner;
+        repo = context.repo?.repo;
+        prNumber = context.payload.pull_request?.number;
+
+        if (!prNumber) {
+          throw new Error('This action can only be run on pull request events');
+        }
+      } catch (e) {
+        throw new Error(`Failed to initialize GitHub client: ${e.message}`);
+      }
     }
 
     // Create temp directory for diffs
@@ -43,42 +96,84 @@ async function run() {
     }
 
     // Generate raw diff
-    core.info('Generating diff between directories...');
-    const rawDiffFile = path.join(diffDir, 'raw-diff.txt');
-    await generateDiff(sourceDir, targetDir, rawDiffFile, ignorePatterns);
-
-    // Read the raw diff to store file paths for later use when headers are disabled
-    const rawDiffContent = fs.readFileSync(rawDiffFile, 'utf8');
-    const filePathMap = extractFilePathsFromRawDiff(rawDiffContent);
-
-    // Split diff by files
-    core.info('Splitting diff by files...');
-    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir, includeHeaders);
-    core.info(`Generated ${diffFiles.length} diff files`);
-
-    // Delete previous comments if required
-    if (deletePreviousComments) {
-      core.info('Deleting previous diff comments...');
-      await deletePreviousDiffComments(octokit, owner, repo, prNumber);
+    if (!isCLI) {
+      core.info(`Generating diff between directories: ${sourceDir} vs ${targetDir}`);
     }
+    const rawDiffFile = path.join(diffDir, 'raw-diff.txt');
+    const hasDiff = await generateDiff(sourceDir, targetDir, rawDiffFile, ignorePatterns, isCLI);
 
-    // If no diff files, post a single comment
-    if (diffFiles.length === 0) {
-      core.info('No differences found, posting a single comment');
-      await postComment(
-        octokit,
-        owner,
-        repo,
-        prNumber,
-        `### No differences\nNo differences found.`
-      );
+    if (!hasDiff) {
+      if (octokit && prNumber) {
+        if (deletePreviousComments) {
+          await deletePreviousDiffComments(octokit, owner, repo, prNumber);
+        }
+        await postComment(
+          octokit,
+          owner,
+          repo,
+          prNumber,
+          `### No differences\nNo differences found between directories.`
+        );
+      } else {
+        console.log('No differences found between directories');
+      }
       return;
     }
 
-    // Proceed directly to posting individual diff comments
-    core.info('Posting individual diff comments...');
+    // Read the raw diff to store file paths for later use when headers are disabled
+    const rawDiffContent = fs.readFileSync(rawDiffFile, 'utf8');
 
-    // Post each file diff as a separate comment
+    if (!rawDiffContent.trim()) {
+      // Empty diff file - treat as no differences
+      if (octokit && prNumber) {
+        if (deletePreviousComments) {
+          await deletePreviousDiffComments(octokit, owner, repo, prNumber);
+        }
+        await postComment(
+          octokit,
+          owner,
+          repo,
+          prNumber,
+          `### No differences\nNo differences found between directories.`
+        );
+      } else {
+        console.log('No differences found between directories');
+      }
+      return;
+    }
+
+    const filePathMap = extractFilePathsFromRawDiff(rawDiffContent);
+
+    // Split diff by files
+    const diffFiles = await splitDiffByFiles(rawDiffFile, diffDir, includeHeaders, targetDir);
+
+    // Delete previous comments if required
+    if (deletePreviousComments && octokit && prNumber) {
+      await deletePreviousDiffComments(octokit, owner, repo, prNumber);
+    }
+
+    // If no diff files, post a single comment or print message
+    if (diffFiles.length === 0) {
+      if (octokit && prNumber) {
+        await postComment(
+          octokit,
+          owner,
+          repo,
+          prNumber,
+          `### No differences\nNo differences found.`
+        );
+      } else {
+        console.log('No differences found');
+      }
+      return;
+    }
+
+    // Post diffs to GitHub or print to console
+    if (!octokit || !prNumber) {
+      console.log(`\nFound ${diffFiles.length} file(s) with differences\n`);
+    }
+
+    // Post each file diff as a separate comment or print to console
     for (const file of diffFiles) {
       const diffContent = fs.readFileSync(file, 'utf8');
 
@@ -89,47 +184,63 @@ async function run() {
       if (filePathMap[fileIndex]) {
         filePath = filePathMap[fileIndex];
       } else {
-        filePath = extractFilePath(diffContent, includeHeaders, file);
+        filePath = extractFilePath(diffContent, includeHeaders, file, targetDir);
       }
 
-      // Handle large diffs by splitting into multiple comments if needed
-      if (diffContent.length > maxCommentSize - 100) {
-        const chunks = splitLargeContent(diffContent, maxCommentSize - 100);
+      if (octokit && prNumber) {
+        // Handle large diffs by splitting into multiple comments if needed
+        if (diffContent.length > maxCommentSize - 100) {
+          const chunks = splitLargeContent(diffContent, maxCommentSize - 100);
 
-        for (let i = 0; i < chunks.length; i++) {
-          const title = i === 0 ?
-            `### ${filePath}` :
-            `### ${filePath} (continued ${i+1}/${chunks.length})`;
+          for (let i = 0; i < chunks.length; i++) {
+            const title = i === 0 ?
+              `### ${filePath}` :
+              `### ${filePath} (continued ${i+1}/${chunks.length})`;
 
+            await postComment(
+              octokit,
+              owner,
+              repo,
+              prNumber,
+              `${title}\n\`\`\`diff\n${chunks[i]}\n\`\`\``
+            );
+
+            // Add a small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } else {
+          // Post as a single comment
           await postComment(
             octokit,
             owner,
             repo,
             prNumber,
-            `${title}\n\`\`\`diff\n${chunks[i]}\n\`\`\``
+            `### ${filePath}\n\`\`\`diff\n${diffContent}\n\`\`\``
           );
 
           // Add a small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       } else {
-        // Post as a single comment
-        await postComment(
-          octokit,
-          owner,
-          repo,
-          prNumber,
-          `### ${filePath}\n\`\`\`diff\n${diffContent}\n\`\`\``
-        );
-
-        // Add a small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Local mode: print to console
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`File: ${filePath}`);
+        console.log(`${'='.repeat(80)}`);
+        console.log(diffContent);
+        console.log(`${'='.repeat(80)}\n`);
       }
     }
 
-    core.info('All diff comments posted successfully!');
+    if (!octokit || !prNumber) {
+      console.log(`\n✓ Processed ${diffFiles.length} file(s) with differences`);
+    }
   } catch (error) {
-    core.setFailed(`Action failed with error: ${error.message}`);
+    if (isCLI) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    } else {
+      core.setFailed(`Action failed with error: ${error.message}`);
+    }
   }
 }
 
@@ -179,9 +290,13 @@ function extractFilePathsFromRawDiff(rawDiffContent) {
       if (filePath) {
         // Store the full relative path instead of just the basename
         // If it's an absolute path from the target directory, make it relative
-        const targetDir = core.getInput('target-dir');
-        if (filePath.startsWith(targetDir)) {
-          filePath = filePath.substring(targetDir.length + 1); // +1 to remove leading slash
+        try {
+          const targetDir = getInput('target-dir');
+          if (targetDir && filePath.startsWith(targetDir)) {
+            filePath = filePath.substring(targetDir.length + 1); // +1 to remove leading slash
+          }
+        } catch (e) {
+          // targetDir not available, use filePath as-is
         }
         filePathMap[fileIndex] = filePath;
         fileIndex++;
@@ -234,11 +349,18 @@ async function postComment(octokit, owner, repo, prNumber, body) {
  * @param {string} filePath - The path to the diff file
  * @returns {string} - The relative file path
  */
-function extractFilePath(diffContent, includeHeaders, filePath) {
+function extractFilePath(diffContent, includeHeaders, filePath, targetDir = null) {
   // First try to extract from the diff file name itself
   const fileName = path.basename(filePath).replace(/^\d+_/, '').replace('.diff', '');
 
-  // Only use the filename from the diff file as a last resort
+  // Get targetDir if not provided
+  if (!targetDir) {
+    try {
+      targetDir = getInput('target-dir');
+    } catch (e) {
+      // Not available
+    }
+  }
 
   const lines = diffContent.split('\n');
 
@@ -256,9 +378,8 @@ function extractFilePath(diffContent, includeHeaders, filePath) {
         const dirMatch = line.match(/diff .* "?([^"]+)"? "?([^"]+)"?/);
         if (dirMatch && dirMatch[2]) {
           // Get the path relative to the target directory
-          const targetDir = core.getInput('target-dir');
           const absolutePath = dirMatch[2];
-          if (absolutePath.startsWith(targetDir)) {
+          if (targetDir && absolutePath.startsWith(targetDir)) {
             return absolutePath.substring(targetDir.length + 1); // +1 to remove the leading slash
           }
           return dirMatch[2];
